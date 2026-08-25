@@ -39,6 +39,14 @@ export interface RevenueDriver {
   annualGrowth: number;
 }
 
+export interface SubscriptionDriver {
+  newCustomersPerPeriod: number;
+  churnRate: number;
+  arpu: number;
+  cac: number;
+  serviceCostPerUser: number;
+}
+
 export interface ProjectModel {
   name: string;
   currency: string;
@@ -48,6 +56,11 @@ export interface ProjectModel {
   inflationMode: "nominal" | "real";
   discountRateMode: "nominal" | "real";
   revenue: RevenueDriver;
+  revenueModel?: "generic" | "subscription";
+  subscription?: SubscriptionDriver;
+  role?: string;
+  baseline?: string;
+  schemaVersion?: number;
   variableCostRate: number;
   annualFixedOperatingCost: number;
   taxRate: number;
@@ -123,6 +136,27 @@ function buildCashFlows(model: ProjectModel, revenueScale = 1, costScale = 1, de
   const initial =
     model.necessaryStartupCost + model.minimumOperatingCost + model.workingCapital + model.riskContingency + confirmedHiddenCosts;
   const cashFlows = [-initial];
+  if (model.revenueModel === "subscription" && model.subscription) {
+    const sub = model.subscription;
+    let customers = 0;
+    for (let period = 1; period <= model.periods; period += 1) {
+      if (period <= delay) {
+        cashFlows.push(-model.annualFixedOperatingCost * costScale);
+        continue;
+      }
+      const newCustomers = sub.newCustomersPerPeriod;
+      customers = customers * (1 - sub.churnRate) + newCustomers;
+      const revenue = customers * sub.arpu * revenueScale;
+      const cashOperatingCost =
+        (customers * sub.serviceCostPerUser + newCustomers * sub.cac) * costScale +
+        model.annualFixedOperatingCost * costScale;
+      const taxableIncome = Math.max(0, revenue - cashOperatingCost);
+      let freeCashFlow = revenue - cashOperatingCost - taxableIncome * model.taxRate;
+      if (period === model.periods) freeCashFlow += model.terminalValue + model.workingCapital;
+      cashFlows.push(freeCashFlow);
+    }
+    return cashFlows;
+  }
   for (let period = 1; period <= model.periods; period += 1) {
     if (period <= delay) {
       cashFlows.push(-model.annualFixedOperatingCost * costScale);
@@ -212,6 +246,20 @@ export function evaluateProject(model: ProjectModel): EvaluationResult {
             : "见情景结果",
       };
     })
+    .concat([
+      {
+        variable: "折现率",
+        downsideNpv: npv(model.discountRate + 0.02, cashFlows),
+        upsideNpv: npv(Math.max(-0.5, model.discountRate - 0.02), cashFlows),
+        impact: Math.abs(
+          npv(model.discountRate + 0.02, cashFlows) - npv(Math.max(-0.5, model.discountRate - 0.02), cashFlows),
+        ),
+        switchingValue:
+          metrics.irr === null
+            ? "IRR 无有效解，折现率临界值不可用"
+            : `折现率高于 IRR（约 ${(metrics.irr * 100).toFixed(1)}%）时 NPV 转负`,
+      },
+    ])
     .sort((a, b) => b.impact - a.impact);
   const missingCosts = model.hiddenCosts.filter((item) => !item.included);
   const unknowns = model.assumptions.filter((item) => item.status === "unknown" || item.confidence === "low");
@@ -227,12 +275,22 @@ export function evaluateProject(model: ProjectModel): EvaluationResult {
   else if (unknowns.length > 0) recommendation = "继续验证";
   else if (warnings.length > 0 || scenarios[0].npv < 0) recommendation = "满足条件后推进";
   else recommendation = "建议推进";
-  const revenueByPeriod = usesManualCashFlows
-    ? []
-    : cashFlows.slice(1).map((_, index) =>
+  let revenueByPeriod: number[] = [];
+  if (!usesManualCashFlows) {
+    if (model.revenueModel === "subscription" && model.subscription) {
+      const sub = model.subscription;
+      let customers = 0;
+      revenueByPeriod = cashFlows.slice(1).map(() => {
+        customers = customers * (1 - sub.churnRate) + sub.newCustomersPerPeriod;
+        return customers * sub.arpu;
+      });
+    } else {
+      revenueByPeriod = cashFlows.slice(1).map((_, index) =>
         model.revenue.prospects * model.revenue.conversionRate * model.revenue.averageTicket * model.revenue.frequency *
         (1 + model.revenue.annualGrowth) ** index,
       );
+    }
+  }
   let breakEvenPoint: EvaluationResult["breakEven"] = null;
   if (!usesManualCashFlows) {
     try {
@@ -313,9 +371,9 @@ export function buildDecisionRecord(model: ProjectModel, evaluation: EvaluationR
     model.assumptions.filter((item) => item.status === status).map((item) => `${item.name}：${item.value}`);
   const missing = model.hiddenCosts.filter((item) => !item.included);
   return {
-    question: `是否应按当前条件推进“${model.name}”？`,
+    question: `是否应按当前条件推进“${model.name}”？${model.role ? `（决策者角色：${model.role}）` : ""}`,
     framework: "基准方案比较 + 增量现金流 + NPV/IRR/MIRR + 情景分析 + 敏感性与临界值",
-    baseline: "不做项目：保留资金及现有资源的下一最佳用途",
+    baseline: model.baseline?.trim() || "不做项目：保留资金及现有资源的下一最佳用途",
     alternatives: ["缩小最低可行规模", "延后投资并先验证关键假设"],
     inputs: { known: grouped("known"), estimated: grouped("estimated"), unknown: grouped("unknown") },
     hiddenCosts: model.hiddenCosts.map(

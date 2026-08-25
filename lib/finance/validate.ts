@@ -1,4 +1,4 @@
-import type { Assumption, HiddenCost, ProjectModel, RevenueDriver } from "./appraisal";
+import type { Assumption, HiddenCost, ProjectModel, RevenueDriver, SubscriptionDriver } from "./appraisal";
 import { defaultProject } from "./default-project";
 import type { DatedCashFlow } from "./math";
 
@@ -45,8 +45,20 @@ function normalizeRevenue(value: unknown): RevenueDriver {
   };
 }
 
-function normalizeAssumptions(value: unknown): Assumption[] {
-  if (value === undefined) return [];
+function normalizeSubscription(value: unknown): SubscriptionDriver | undefined {
+  if (value === undefined || value === null) return defaultProject.subscription;
+  const raw = asObject(value, "订阅驱动");
+  const base = defaultProject.subscription!;
+  return {
+    newCustomersPerPeriod: numberOr(raw.newCustomersPerPeriod, base.newCustomersPerPeriod, "每期新增客户"),
+    churnRate: numberOr(raw.churnRate, base.churnRate, "流失率"),
+    arpu: numberOr(raw.arpu, base.arpu, "ARPU"),
+    cac: numberOr(raw.cac, base.cac, "获客成本"),
+    serviceCostPerUser: numberOr(raw.serviceCostPerUser, base.serviceCostPerUser, "单客户服务成本"),
+  };
+}
+
+function normalizeAssumptions(value: unknown): Assumption[] {  if (value === undefined) return [];
   if (!Array.isArray(value)) fail("假设列表必须是数组");
   return value.map((item, index) => {
     const raw = asObject(item, `假设第 ${index + 1} 项`);
@@ -119,6 +131,11 @@ export function normalizeProjectModel(input: unknown): ProjectModel {
     inflationMode: oneOf(raw.inflationMode, ["nominal", "real"] as const, base.inflationMode),
     discountRateMode: oneOf(raw.discountRateMode, ["nominal", "real"] as const, base.discountRateMode),
     revenue: normalizeRevenue(raw.revenue),
+    revenueModel: oneOf(raw.revenueModel, ["generic", "subscription"] as const, "generic"),
+    subscription: normalizeSubscription(raw.subscription),
+    role: stringOr(raw.role, base.role ?? "项目经营者"),
+    baseline: stringOr(raw.baseline, base.baseline ?? ""),
+    schemaVersion: Math.max(1, Math.round(numberOr(raw.schemaVersion, 1, "schemaVersion"))),
     variableCostRate: numberOr(raw.variableCostRate, base.variableCostRate, "变动成本率"),
     annualFixedOperatingCost: numberOr(raw.annualFixedOperatingCost, base.annualFixedOperatingCost, "年固定运营成本"),
     taxRate: numberOr(raw.taxRate, base.taxRate, "税率"),

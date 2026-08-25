@@ -1,16 +1,17 @@
 "use client";
 
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { gsap } from "gsap";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Download, FileCheck2, FolderOpen,
-  Gauge, Landmark, RefreshCw, Save, ShieldCheck, Trash2, Upload, X,
+  Gauge, Landmark, Plus, Printer, RefreshCw, Save, ShieldCheck, Trash2, Upload, X,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  buildDecisionRecord, calculateReverseValuation, evaluateProject, type ProjectModel,
+  buildDecisionRecord, calculateReverseValuation, evaluateProject,
+  type Assumption, type DecisionRecord, type EvaluationResult, type HiddenCost, type ProjectModel,
 } from "@/lib/finance/appraisal";
 import { defaultProject } from "@/lib/finance/default-project";
 import { normalizeProjectModel } from "@/lib/finance/validate";
@@ -31,12 +32,16 @@ function formatMoney(value: number, currency = "CNY") {
 }
 function formatPercent(value: number | null) { return value === null ? "无解" : `${(value * 100).toFixed(1)}%`; }
 
-function NumberField({ label, value, onChange, suffix }: { label: string; value: number; onChange: (value: number) => void; suffix?: string }) {
+function NumberField({ label, value, onChange, suffix, min, max }: { label: string; value: number; onChange: (value: number) => void; suffix?: string; min?: number; max?: number }) {
   return (
     <label>
       <span className="label">{label}</span>
       <div className="relative">
-        <input aria-label={label} className="field num pr-12" type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+        <input aria-label={label} className="field num pr-12" type="number" value={value} min={min} max={max} onChange={(event) => {
+          const raw = Number(event.target.value);
+          if (!Number.isFinite(raw)) return;
+          onChange(min !== undefined && raw < min ? min : max !== undefined && raw > max ? max : raw);
+        }} />
         <span className="absolute right-3 top-2.5 text-xs text-[var(--muted)]">{suffix}</span>
       </div>
     </label>
@@ -67,6 +72,57 @@ function parseDatedCashFlowCsv(csv: string): DatedCashFlow[] {
   return flows;
 }
 
+/** 假设编辑器：名称、数值、状态、可信度、来源、日期均可编辑，支持增删。 */
+function AssumptionEditor({ items, onChange }: { items: Assumption[]; onChange: (items: Assumption[]) => void }) {
+  const patch = (index: number, part: Partial<Assumption>) =>
+    onChange(items.map((item, i) => (i === index ? { ...item, ...part } : item)));
+  return (
+    <div className="space-y-3">
+      {items.map((item, index) => (
+        <div key={index} className="grid gap-2 rounded-lg border hairline bg-white/35 p-3 md:grid-cols-[1.2fr_1fr_.9fr_.9fr_auto]">
+          <input aria-label={`假设名称 ${index + 1}`} className="field !py-1.5 text-sm" value={item.name} onChange={(e) => patch(index, { name: e.target.value })} />
+          <input aria-label={`假设数值 ${index + 1}`} className="field num !py-1.5 text-sm" value={item.value} onChange={(e) => patch(index, { value: e.target.value })} />
+          <select aria-label={`假设状态 ${index + 1}`} className="field !py-1.5 text-sm" value={item.status} onChange={(e) => patch(index, { status: e.target.value as Assumption["status"] })}>
+            <option value="known">已知</option><option value="estimated">估算</option><option value="unknown">待验证</option>
+          </select>
+          <select aria-label={`假设可信度 ${index + 1}`} className="field !py-1.5 text-sm" value={item.confidence} onChange={(e) => patch(index, { confidence: e.target.value as Assumption["confidence"] })}>
+            <option value="high">可信度高</option><option value="medium">可信度中</option><option value="low">可信度低</option>
+          </select>
+          <button aria-label={`删除假设 ${index + 1}`} className="self-center rounded-lg border hairline p-2 text-[var(--red)]" onClick={() => onChange(items.filter((_, i) => i !== index))}><Trash2 size={13} /></button>
+          <input aria-label={`假设来源 ${index + 1}`} className="field !py-1.5 text-xs md:col-span-2" placeholder="来源" value={item.source} onChange={(e) => patch(index, { source: e.target.value })} />
+          <input aria-label={`假设日期 ${index + 1}`} type="date" className="field !py-1.5 text-xs" value={item.asOf} onChange={(e) => patch(index, { asOf: e.target.value })} />
+        </div>
+      ))}
+      <button className="btn-secondary w-full text-sm" onClick={() => onChange([...items, { name: "新假设", value: "", status: "unknown", confidence: "low", source: "", asOf: new Date().toISOString().slice(0, 10) }])}>
+        <Plus className="mr-1 inline" size={14} />添加假设
+      </button>
+    </div>
+  );
+}
+
+/** 隐藏成本编辑器：名称、金额、分类、是否计入均可编辑，支持增删。 */
+function HiddenCostEditor({ items, currency, onChange }: { items: HiddenCost[]; currency: string; onChange: (items: HiddenCost[]) => void }) {
+  const patch = (index: number, part: Partial<HiddenCost>) =>
+    onChange(items.map((item, i) => (i === index ? { ...item, ...part } : item)));
+  return (
+    <div className="space-y-2">
+      {items.map((item, index) => (
+        <div key={index} className="flex flex-wrap items-center gap-2 rounded-lg border hairline bg-white/35 p-3">
+          <input type="checkbox" aria-label={`计入 ${item.name}`} checked={item.included} onChange={(e) => patch(index, { included: e.target.checked })} />
+          <input aria-label={`成本名称 ${index + 1}`} className="field !w-40 !py-1.5 text-sm" value={item.name} onChange={(e) => patch(index, { name: e.target.value })} />
+          <input aria-label={`成本金额 ${index + 1}`} type="number" min={0} className="field num !w-32 !py-1.5 text-sm" value={item.amount} onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) patch(index, { amount: Math.max(0, v) }); }} />
+          <input aria-label={`成本分类 ${index + 1}`} className="field !w-28 !py-1.5 text-xs" placeholder="分类" value={item.category} onChange={(e) => patch(index, { category: e.target.value })} />
+          <span className="num text-xs text-[var(--muted)]">{formatMoney(item.amount, currency)}</span>
+          <button aria-label={`删除成本 ${index + 1}`} className="ml-auto rounded-lg border hairline p-2 text-[var(--red)]" onClick={() => onChange(items.filter((_, i) => i !== index))}><Trash2 size={13} /></button>
+        </div>
+      ))}
+      <button className="btn-secondary w-full text-sm" onClick={() => onChange([...items, { name: "新成本项", amount: 0, included: false, category: "未分类" }])}>
+        <Plus className="mr-1 inline" size={14} />添加隐藏成本
+      </button>
+    </div>
+  );
+}
+
 export function ProjectApp() {
   const [mode, setMode] = useState<"guide" | "workbench">("guide");
   const [stage, setStage] = useState(0);
@@ -87,15 +143,36 @@ export function ProjectApp() {
   const resultRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
 
-  // 财务引擎可能因输入组合抛出异常；捕获并展示，避免整页崩溃。
-  const evaluation = useMemo(() => {
-    try { return { result: evaluateProject(project), error: "" }; }
-    catch (error) { return { result: null, error: error instanceof Error ? error.message : "评估失败" }; }
+  // 服务端优先的评估：同一引擎模块，服务端是主路径；服务不可用时本地兜底。
+  // 200ms 防抖，避免每敲一个数字就触发 80 次迭代的临界值二分。
+  function computeLocal(model: ProjectModel): { result: EvaluationResult | null; record: DecisionRecord | null; error: string } {
+    try {
+      const result = evaluateProject(model);
+      return { result, record: buildDecisionRecord(model, result), error: "" };
+    } catch (error) {
+      return { result: null, record: null, error: error instanceof Error ? error.message : "评估失败" };
+    }
+  }
+  const [evalState, setEvalState] = useState(() => computeLocal(defaultProject));
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch("/api/projects/preview/evaluate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(project),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "评估失败");
+        setEvalState({ result: body.evaluation as EvaluationResult, record: body.decisionRecord as DecisionRecord, error: "" });
+      } catch {
+        setEvalState(computeLocal(project));
+      }
+    }, 200);
+    return () => clearTimeout(timer);
   }, [project]);
-  const record = useMemo(
-    () => (evaluation.result ? buildDecisionRecord(project, evaluation.result) : null),
-    [project, evaluation],
-  );
+  const evaluation = { result: evalState.result, error: evalState.error };
+  const record = evalState.record;
   const reverse = useMemo(() => calculateReverseValuation({
     futureCashFlows: [{ period: futureYear, amount: futureValue }],
     minimumHurdleRate: project.discountRate,
@@ -136,6 +213,8 @@ export function ProjectApp() {
     setProject((current) => ({ ...current, [key]: value }));
   const updateRevenue = (key: keyof ProjectModel["revenue"], value: number) =>
     setProject((current) => ({ ...current, revenue: { ...current.revenue, [key]: value } }));
+  const updateSub = (key: keyof NonNullable<ProjectModel["subscription"]>, value: number) =>
+    setProject((current) => ({ ...current, subscription: { ...(current.subscription ?? defaultProject.subscription!), [key]: value } }));
 
   const cumulativeData = (evaluation.result?.cashFlows ?? []).reduce<{ period: string; cashFlow: number; cumulative: number }[]>((rows, cashFlow, index) => {
     rows.push({ period: index === 0 ? "现在" : `第${index}年`, cashFlow, cumulative: cashFlow + (rows.at(-1)?.cumulative ?? 0) });
@@ -246,60 +325,59 @@ export function ProjectApp() {
     if (stage === 0) return (
       <div className="grid gap-5 md:grid-cols-2">
         <label><span className="label">项目名称</span><input className="field" value={project.name} onChange={(e) => update("name", e.target.value)} /></label>
-        <label><span className="label">你的角色</span><select className="field"><option>项目经营者</option><option>财务出资人</option><option>合作方</option></select></label>
+        <label><span className="label">你的角色</span><select className="field" value={project.role ?? "项目经营者"} onChange={(e) => update("role", e.target.value)}><option>项目经营者</option><option>财务出资人</option><option>合作方</option></select></label>
         <NumberField label="项目周期" value={project.periods} suffix="年" onChange={(v) => update("periods", Math.max(1, Math.round(v || 1)))} />
         <label><span className="label">币种</span><select className="field" value={project.currency} onChange={(e) => update("currency", e.target.value)}><option value="CNY">CNY 人民币</option><option value="USD">USD 美元</option><option value="EUR">EUR 欧元</option><option value="JPY">JPY 日元</option><option value="HKD">HKD 港币</option></select></label>
-        <label className="md:col-span-2"><span className="label">不做项目的基准方案</span><textarea className="field min-h-24" defaultValue="保留资金，并投入当前收益最高的其他选择" /></label>
+        <label className="md:col-span-2"><span className="label">不做项目的基准方案</span><textarea className="field min-h-24" value={project.baseline ?? ""} placeholder="保留资金，并投入当前收益最高的其他选择" onChange={(e) => update("baseline", e.target.value)} /></label>
       </div>
     );
     if (stage === 1) return (
-      <div className="space-y-3">
-        {project.assumptions.map((item) => (
-          <div key={item.name} className="grid gap-3 border-b hairline py-3 md:grid-cols-[1fr_.8fr_.8fr]">
-            <div><p className="font-medium">{item.name}</p><p className="text-xs text-[var(--muted)]">{item.source} · {item.asOf}</p></div>
-            <span className="num">{item.value}</span>
-            <span className={`text-sm ${item.confidence === "low" ? "text-[var(--red)]" : "text-[var(--green)]"}`}>
-              {item.status === "known" ? "已知" : item.status === "estimated" ? "估算" : "待验证"} · {item.confidence}
-            </span>
-          </div>
-        ))}
-      </div>
+      <AssumptionEditor items={project.assumptions} onChange={(items) => update("assumptions", items)} />
     );
     if (stage === 2) return (
-      <div className="space-y-3">
-        {project.hiddenCosts.map((item, index) => (
-          <label key={item.name} className="flex items-center justify-between gap-4 border-b hairline py-3">
-            <span><b className="font-medium">{item.name}</b><small className="ml-2 text-[var(--muted)]">{item.category}</small></span>
-            <span className="flex items-center gap-4">
-              <span className="num">{formatMoney(item.amount, project.currency)}</span>
-              <input type="checkbox" checked={item.included} onChange={(e) => update("hiddenCosts", project.hiddenCosts.map((cost, i) => i === index ? { ...cost, included: e.target.checked } : cost))} />
-            </span>
-          </label>
-        ))}
-      </div>
+      <HiddenCostEditor items={project.hiddenCosts} currency={project.currency} onChange={(items) => update("hiddenCosts", items)} />
     );
     if (stage === 3) return (
-      <div className="grid gap-5 md:grid-cols-3">
-        <NumberField label="潜在客户数" value={project.revenue.prospects} suffix="人" onChange={(v) => updateRevenue("prospects", v)} />
-        <NumberField label="转化率" value={project.revenue.conversionRate * 100} suffix="%" onChange={(v) => updateRevenue("conversionRate", v / 100)} />
-        <NumberField label="平均客单价" value={project.revenue.averageTicket} suffix="元" onChange={(v) => updateRevenue("averageTicket", v)} />
-        <NumberField label="年购买频次" value={project.revenue.frequency} suffix="次" onChange={(v) => updateRevenue("frequency", v)} />
-        <NumberField label="收入年增长" value={project.revenue.annualGrowth * 100} suffix="%" onChange={(v) => updateRevenue("annualGrowth", v / 100)} />
-        <NumberField label="变动成本率" value={project.variableCostRate * 100} suffix="%" onChange={(v) => update("variableCostRate", v / 100)} />
+      <div className="space-y-5">
+        <label className="block max-w-xs">
+          <span className="label">收益模型</span>
+          <select className="field" value={project.revenueModel ?? "generic"} onChange={(e) => update("revenueModel", e.target.value as ProjectModel["revenueModel"])}>
+            <option value="generic">通用客户驱动</option>
+            <option value="subscription">订阅模型</option>
+          </select>
+        </label>
+        {(project.revenueModel ?? "generic") === "subscription" && project.subscription ? (
+          <div className="grid gap-5 md:grid-cols-3">
+            <NumberField label="每期新增客户" value={project.subscription.newCustomersPerPeriod} suffix="人" min={0} onChange={(v) => updateSub("newCustomersPerPeriod", v)} />
+            <NumberField label="期流失率" value={project.subscription.churnRate * 100} suffix="%" min={0} max={100} onChange={(v) => updateSub("churnRate", v / 100)} />
+            <NumberField label="ARPU（每期）" value={project.subscription.arpu} suffix="元" min={0} onChange={(v) => updateSub("arpu", v)} />
+            <NumberField label="获客成本 CAC" value={project.subscription.cac} suffix="元" min={0} onChange={(v) => updateSub("cac", v)} />
+            <NumberField label="单客户服务成本" value={project.subscription.serviceCostPerUser} suffix="元" min={0} onChange={(v) => updateSub("serviceCostPerUser", v)} />
+          </div>
+        ) : (
+          <div className="grid gap-5 md:grid-cols-3">
+            <NumberField label="潜在客户数" value={project.revenue.prospects} suffix="人" min={0} onChange={(v) => updateRevenue("prospects", v)} />
+            <NumberField label="转化率" value={project.revenue.conversionRate * 100} suffix="%" min={0} max={100} onChange={(v) => updateRevenue("conversionRate", v / 100)} />
+            <NumberField label="平均客单价" value={project.revenue.averageTicket} suffix="元" min={0} onChange={(v) => updateRevenue("averageTicket", v)} />
+            <NumberField label="年购买频次" value={project.revenue.frequency} suffix="次" min={0} onChange={(v) => updateRevenue("frequency", v)} />
+            <NumberField label="收入年增长" value={project.revenue.annualGrowth * 100} suffix="%" min={-100} onChange={(v) => updateRevenue("annualGrowth", v / 100)} />
+            <NumberField label="变动成本率" value={project.variableCostRate * 100} suffix="%" min={0} max={100} onChange={(v) => update("variableCostRate", v / 100)} />
+          </div>
+        )}
       </div>
     );
     if (stage === 4) return (
       <div className="space-y-6">
         <div className="grid gap-5 md:grid-cols-3">
-          <NumberField label="最低可接受回报率" value={project.discountRate * 100} suffix="%" onChange={(v) => update("discountRate", v / 100)} />
-          <NumberField label="目标回报率" value={project.stretchReturnRate * 100} suffix="%" onChange={(v) => update("stretchReturnRate", v / 100)} />
-          <NumberField label="税率" value={project.taxRate * 100} suffix="%" onChange={(v) => update("taxRate", v / 100)} />
-          <NumberField label="必要启动成本" value={project.necessaryStartupCost} suffix="元" onChange={(v) => update("necessaryStartupCost", v)} />
-          <NumberField label="最低运营成本" value={project.minimumOperatingCost} suffix="元" onChange={(v) => update("minimumOperatingCost", v)} />
-          <NumberField label="营运资金" value={project.workingCapital} suffix="元" onChange={(v) => update("workingCapital", v)} />
-          <NumberField label="风险预备金" value={project.riskContingency} suffix="元" onChange={(v) => update("riskContingency", v)} />
-          <NumberField label="年固定运营成本" value={project.annualFixedOperatingCost} suffix="元" onChange={(v) => update("annualFixedOperatingCost", v)} />
-          <NumberField label="期末残值" value={project.terminalValue} suffix="元" onChange={(v) => update("terminalValue", v)} />
+          <NumberField label="最低可接受回报率" value={project.discountRate * 100} suffix="%" min={0} onChange={(v) => update("discountRate", v / 100)} />
+          <NumberField label="目标回报率" value={project.stretchReturnRate * 100} suffix="%" min={0} onChange={(v) => update("stretchReturnRate", v / 100)} />
+          <NumberField label="税率" value={project.taxRate * 100} suffix="%" min={0} max={100} onChange={(v) => update("taxRate", v / 100)} />
+          <NumberField label="必要启动成本" value={project.necessaryStartupCost} suffix="元" min={0} onChange={(v) => update("necessaryStartupCost", v)} />
+          <NumberField label="最低运营成本" value={project.minimumOperatingCost} suffix="元" min={0} onChange={(v) => update("minimumOperatingCost", v)} />
+          <NumberField label="营运资金" value={project.workingCapital} suffix="元" min={0} onChange={(v) => update("workingCapital", v)} />
+          <NumberField label="风险预备金" value={project.riskContingency} suffix="元" min={0} onChange={(v) => update("riskContingency", v)} />
+          <NumberField label="年固定运营成本" value={project.annualFixedOperatingCost} suffix="元" min={0} onChange={(v) => update("annualFixedOperatingCost", v)} />
+          <NumberField label="期末残值" value={project.terminalValue} suffix="元" min={0} onChange={(v) => update("terminalValue", v)} />
         </div>
         <div className="grid gap-5 md:grid-cols-2">
           <label>
@@ -395,6 +473,7 @@ export function ProjectApp() {
           <button className="btn-secondary" onClick={() => download(`${project.name}.json`, projectToJson(project), "application/json")}>
             <Download className="mr-2 inline" size={15} />导出 JSON
           </button>
+          <button className="btn-secondary" onClick={() => window.print()}><Printer className="mr-2 inline" size={15} />打印 / PDF</button>
           <button className="btn-primary" onClick={saveProject}><Save className="mr-2 inline" size={15} />保存项目</button>
         </div>
       </header>
@@ -402,29 +481,12 @@ export function ProjectApp() {
       <main className="grid min-h-[calc(100vh-70px)] lg:grid-cols-[.9fr_1.55fr_1fr]">
         <aside data-animate="section" className="border-r hairline p-5 md:p-6">
           <SectionTitle index="01" title="事实与证据" icon={<FileCheck2 size={16} />} />
-          <div className="mt-5 space-y-3">
-            {project.assumptions.map((item) => (
-              <div key={item.name} className="border-b hairline pb-3">
-                <div className="flex justify-between gap-3">
-                  <b className="text-sm">{item.name}</b>
-                  <span className={`text-xs ${item.confidence === "low" ? "text-[var(--red)]" : "text-[var(--green)]"}`}>
-                    {item.status === "unknown" ? "待验证" : item.status === "estimated" ? "估算" : "已知"}
-                  </span>
-                </div>
-                <p className="num mt-1 text-sm">{item.value}</p>
-                <p className="mt-1 text-xs text-[var(--muted)]">{item.source} · {item.asOf}</p>
-              </div>
-            ))}
+          <div className="mt-5">
+            <AssumptionEditor items={project.assumptions} onChange={(items) => update("assumptions", items)} />
           </div>
           <SectionTitle index="02" title="隐藏成本" icon={<ShieldCheck size={16} />} className="mt-9" />
-          <div className="mt-4 space-y-2">
-            {project.hiddenCosts.map((item, index) => (
-              <label key={item.name} className="flex items-center gap-3 rounded-lg border hairline bg-white/35 p-3">
-                <input type="checkbox" checked={item.included} onChange={(e) => update("hiddenCosts", project.hiddenCosts.map((cost, i) => i === index ? { ...cost, included: e.target.checked } : cost))} />
-                <span className="flex-1"><b className="text-sm">{item.name}</b><small className="ml-2 text-[var(--muted)]">{item.category}</small></span>
-                <span className="num text-sm">{formatMoney(item.amount, project.currency)}</span>
-              </label>
-            ))}
+          <div className="mt-4">
+            <HiddenCostEditor items={project.hiddenCosts} currency={project.currency} onChange={(items) => update("hiddenCosts", items)} />
           </div>
           {evaluationResult && evaluationResult.warnings.length > 0 && (
             <div className="mt-6 rounded-lg border border-[var(--copper-soft)] bg-[var(--copper-soft)]/40 p-4">
@@ -438,16 +500,35 @@ export function ProjectApp() {
 
         <section data-animate="section" className="border-r hairline p-5 md:p-6">
           <SectionTitle index="03" title="收益与成本驱动" icon={<Gauge size={16} />} />
-          <div className="mt-5 grid gap-4 md:grid-cols-3">
-            <NumberField label="潜在客户数" value={project.revenue.prospects} suffix="人" onChange={(v) => updateRevenue("prospects", v)} />
-            <NumberField label="转化率" value={project.revenue.conversionRate * 100} suffix="%" onChange={(v) => updateRevenue("conversionRate", v / 100)} />
-            <NumberField label="平均客单价" value={project.revenue.averageTicket} suffix="元" onChange={(v) => updateRevenue("averageTicket", v)} />
-            <NumberField label="年购买频次" value={project.revenue.frequency} suffix="次" onChange={(v) => updateRevenue("frequency", v)} />
-            <NumberField label="收入年增长" value={project.revenue.annualGrowth * 100} suffix="%" onChange={(v) => updateRevenue("annualGrowth", v / 100)} />
-            <NumberField label="变动成本率" value={project.variableCostRate * 100} suffix="%" onChange={(v) => update("variableCostRate", v / 100)} />
-            <NumberField label="年固定运营成本" value={project.annualFixedOperatingCost} suffix="元" onChange={(v) => update("annualFixedOperatingCost", v)} />
-            <NumberField label="必要启动成本" value={project.necessaryStartupCost} suffix="元" onChange={(v) => update("necessaryStartupCost", v)} />
-            <NumberField label="税率" value={project.taxRate * 100} suffix="%" onChange={(v) => update("taxRate", v / 100)} />
+          <label className="mt-4 block max-w-xs">
+            <span className="label">收益模型</span>
+            <select className="field !py-1.5 text-sm" value={project.revenueModel ?? "generic"} onChange={(e) => update("revenueModel", e.target.value as ProjectModel["revenueModel"])}>
+              <option value="generic">通用客户驱动</option>
+              <option value="subscription">订阅模型</option>
+            </select>
+          </label>
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            {(project.revenueModel ?? "generic") === "subscription" && project.subscription ? (
+              <>
+                <NumberField label="每期新增客户" value={project.subscription.newCustomersPerPeriod} suffix="人" min={0} onChange={(v) => updateSub("newCustomersPerPeriod", v)} />
+                <NumberField label="期流失率" value={project.subscription.churnRate * 100} suffix="%" min={0} max={100} onChange={(v) => updateSub("churnRate", v / 100)} />
+                <NumberField label="ARPU（每期）" value={project.subscription.arpu} suffix="元" min={0} onChange={(v) => updateSub("arpu", v)} />
+                <NumberField label="获客成本 CAC" value={project.subscription.cac} suffix="元" min={0} onChange={(v) => updateSub("cac", v)} />
+                <NumberField label="单客户服务成本" value={project.subscription.serviceCostPerUser} suffix="元" min={0} onChange={(v) => updateSub("serviceCostPerUser", v)} />
+              </>
+            ) : (
+              <>
+                <NumberField label="潜在客户数" value={project.revenue.prospects} suffix="人" min={0} onChange={(v) => updateRevenue("prospects", v)} />
+                <NumberField label="转化率" value={project.revenue.conversionRate * 100} suffix="%" min={0} max={100} onChange={(v) => updateRevenue("conversionRate", v / 100)} />
+                <NumberField label="平均客单价" value={project.revenue.averageTicket} suffix="元" min={0} onChange={(v) => updateRevenue("averageTicket", v)} />
+                <NumberField label="年购买频次" value={project.revenue.frequency} suffix="次" min={0} onChange={(v) => updateRevenue("frequency", v)} />
+                <NumberField label="收入年增长" value={project.revenue.annualGrowth * 100} suffix="%" min={-100} onChange={(v) => updateRevenue("annualGrowth", v / 100)} />
+                <NumberField label="变动成本率" value={project.variableCostRate * 100} suffix="%" min={0} max={100} onChange={(v) => update("variableCostRate", v / 100)} />
+              </>
+            )}
+            <NumberField label="年固定运营成本" value={project.annualFixedOperatingCost} suffix="元" min={0} onChange={(v) => update("annualFixedOperatingCost", v)} />
+            <NumberField label="必要启动成本" value={project.necessaryStartupCost} suffix="元" min={0} onChange={(v) => update("necessaryStartupCost", v)} />
+            <NumberField label="税率" value={project.taxRate * 100} suffix="%" min={0} max={100} onChange={(v) => update("taxRate", v / 100)} />
           </div>
 
           {evaluation.error && (

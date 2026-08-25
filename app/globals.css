@@ -41,3 +41,13 @@ button { cursor: pointer; }
 .btn-secondary { border: 1px solid var(--line); border-radius: 8px; padding: .68rem .9rem; background: rgba(255,255,255,.58); color: var(--ink); }
 .eyebrow { color: var(--copper); font-size: .7rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+/* 打印 / 导出 PDF：隐藏交互控件，三栏变单栏，完整展示指标与审计记录 */
+@media print {
+  header, button, input, select, textarea, nav { display: none !important; }
+  main { display: block !important; }
+  aside { border: 0 !important; }
+  details { display: block !important; }
+  details > * { display: block !important; }
+  body { background: #fff; }
+}

@@ -8,6 +8,17 @@ export const defaultProject: ProjectModel = {
   stretchReturnRate: 0.2,
   inflationMode: "nominal",
   discountRateMode: "nominal",
+  role: "项目经营者",
+  baseline: "保留资金，并投入当前收益最高的其他选择",
+  revenueModel: "generic",
+  schemaVersion: 1,
+  subscription: {
+    newCustomersPerPeriod: 200,
+    churnRate: 0.08,
+    arpu: 1200,
+    cac: 300,
+    serviceCostPerUser: 400,
+  },
   revenue: {
     prospects: 1000,
     conversionRate: 0.2,

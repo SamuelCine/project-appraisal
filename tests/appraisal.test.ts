@@ -138,4 +138,38 @@ describe("project appraisal", () => {
     const revenue = result.sensitivity.find((item) => item.variable === "收入");
     expect(revenue?.switchingValue).toBe("收入达到基准的 200% 仍无法转正，方案需重构");
   });
+
+  it("includes discount-rate sensitivity tied to IRR", () => {
+    const result = evaluateProject(project);
+    const rate = result.sensitivity.find((item) => item.variable === "折现率");
+    expect(rate).toBeDefined();
+    expect(rate?.switchingValue).toContain("IRR");
+    // 折现率升高 2 个点，NPV 必然下降
+    expect(rate!.downsideNpv).toBeLessThan(result.metrics.npv);
+  });
+
+  it("drives revenue with the subscription model including churn and CAC", () => {
+    const result = evaluateProject({
+      ...project,
+      revenueModel: "subscription",
+      subscription: { newCustomersPerPeriod: 100, churnRate: 0.1, arpu: 1000, cac: 200, serviceCostPerUser: 100 },
+      annualFixedOperatingCost: 0,
+      taxRate: 0,
+    });
+    // 第一期：100 客户 × 1000 = 100,000 收入；成本 = 100×100 + 100×200 = 30,000
+    expect(result.revenueByPeriod[0]).toBe(100000);
+    expect(result.cashFlows[1]).toBe(70000);
+    // 第二期客户数：100 × 0.9 + 100 = 190
+    expect(result.revenueByPeriod[1]).toBe(190000);
+  });
+
+  it("carries role and baseline into the decision record", () => {
+    const custom = { ...project, role: "财务出资人", baseline: "资金转投指数基金" };
+    const record = buildDecisionRecord(custom, evaluateProject(custom));
+    expect(record.question).toContain("财务出资人");
+    expect(record.baseline).toBe("资金转投指数基金");
+    // 未填写时回退默认文案
+    const fallback = buildDecisionRecord(project, evaluateProject(project));
+    expect(fallback.baseline).toContain("下一最佳用途");
+  });
 });
