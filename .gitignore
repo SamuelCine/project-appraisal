@@ -1,0 +1,10 @@
+.next/
+node_modules/
+coverage/
+*.log
+.env*
+project-appraisal.db*
+tsconfig.tsbuildinfo
+.playwright-cli/
+output/playwright/
+!.env.example
