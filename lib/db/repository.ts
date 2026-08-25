@@ -44,6 +44,12 @@ export function createProjectRepository(filePath = process.env.PROJECT_DB_PATH ?
       const row = db.select().from(projects).where(eq(projects.id, id)).get();
       return row ? { id: row.id, model: JSON.parse(row.modelJson) as ProjectModel, createdAt: row.createdAt, updatedAt: row.updatedAt } : null;
     },
+    remove(id: string): boolean {
+      const existing = db.select({ id: projects.id }).from(projects).where(eq(projects.id, id)).get();
+      if (!existing) return false;
+      db.delete(projects).where(eq(projects.id, id)).run();
+      return true;
+    },
     list() {
       return db
         .select({ id: projects.id, name: projects.name, currency: projects.currency, updatedAt: projects.updatedAt })

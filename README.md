@@ -122,6 +122,8 @@ npm run lint
 npm run build
 ```
 
+测试设计意图、分层原因与完整运行方案（含中国大陆网络安装提示）见 [docs/12-测试与运行方案.md](docs/12-测试与运行方案.md)。
+
 ## 文档
 
 完整金融框架、运行逻辑、UI 规范与 Obsidian 模板见 [docs/README.md](docs/README.md)。仓库中的 `docs/` 与本机 Obsidian Vault 的 `Projects/project-appraisal/` 内容同步。

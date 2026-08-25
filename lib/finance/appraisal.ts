@@ -1,4 +1,5 @@
 import {
+  breakEven,
   discountedPaybackPeriod,
   irr,
   mirr,
@@ -6,6 +7,9 @@ import {
   paybackPeriod,
   profitabilityIndex,
   signChanges,
+  xirr,
+  xnpv,
+  type DatedCashFlow,
 } from "./math";
 
 export type AssumptionStatus = "known" | "estimated" | "unknown";
@@ -56,11 +60,14 @@ export interface ProjectModel {
   assumptions: Assumption[];
   hiddenCosts: HiddenCost[];
   manualCashFlows?: number[];
+  datedCashFlows?: DatedCashFlow[];
 }
 
 export interface ProjectMetrics {
   npv: number;
   irr: number | null;
+  xnpv: number | null;
+  xirr: number | null;
   mirr: number | null;
   roi: number;
   profitabilityIndex: number;
@@ -86,6 +93,8 @@ export interface SensitivityPoint {
 export interface EvaluationResult {
   cashFlows: number[];
   revenueByPeriod: number[];
+  usesManualCashFlows: boolean;
+  breakEven: { units: number; revenue: number } | null;
   metrics: ProjectMetrics;
   scenarios: ScenarioResult[];
   sensitivity: SensitivityPoint[];
@@ -103,6 +112,11 @@ function currency(amount: number, code: string) {
 
 function buildCashFlows(model: ProjectModel, revenueScale = 1, costScale = 1, delay = 0) {
   if (model.manualCashFlows?.length) return [...model.manualCashFlows];
+  if (model.datedCashFlows?.length) {
+    return [...model.datedCashFlows]
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .map((flow) => flow.amount);
+  }
   const confirmedHiddenCosts = model.hiddenCosts
     .filter((item) => item.included)
     .reduce((total, item) => total + item.amount, 0);
@@ -131,12 +145,15 @@ function buildCashFlows(model: ProjectModel, revenueScale = 1, costScale = 1, de
   return cashFlows;
 }
 
-function metricsFor(cashFlows: number[], discountRate: number): ProjectMetrics {
+function metricsFor(cashFlows: number[], discountRate: number, datedCashFlows?: DatedCashFlow[]): ProjectMetrics {
   const totalOutflow = -cashFlows.filter((flow) => flow < 0).reduce((sum, flow) => sum + flow, 0);
   const totalNet = cashFlows.reduce((sum, flow) => sum + flow, 0);
+  const hasDatedFlows = !!datedCashFlows && datedCashFlows.length >= 2;
   return {
     npv: npv(discountRate, cashFlows),
     irr: irr(cashFlows),
+    xnpv: hasDatedFlows ? xnpv(discountRate, datedCashFlows) : null,
+    xirr: hasDatedFlows ? xirr(datedCashFlows) : null,
     mirr: mirr(cashFlows, discountRate, discountRate),
     roi: totalOutflow ? totalNet / totalOutflow : Number.POSITIVE_INFINITY,
     profitabilityIndex: profitabilityIndex(discountRate, cashFlows),
@@ -146,6 +163,7 @@ function metricsFor(cashFlows: number[], discountRate: number): ProjectMetrics {
 }
 
 function switchingRevenue(model: ProjectModel) {
+  if (npv(model.discountRate, buildCashFlows(model, 2)) < 0) return null;
   let low = 0;
   let high = 2;
   for (let i = 0; i < 80; i += 1) {
@@ -159,8 +177,9 @@ function switchingRevenue(model: ProjectModel) {
 export function evaluateProject(model: ProjectModel): EvaluationResult {
   if (model.inflationMode !== model.discountRateMode) throw new Error("现金流与折现率口径必须一致");
   if (model.periods < 1) throw new Error("项目周期至少为一期");
+  const usesManualCashFlows = !!(model.manualCashFlows?.length || model.datedCashFlows?.length);
   const cashFlows = buildCashFlows(model);
-  const metrics = metricsFor(cashFlows, model.discountRate);
+  const metrics = metricsFor(cashFlows, model.discountRate, model.datedCashFlows);
   const scenarioInputs = [
     { name: "悲观" as const, revenue: 0.8, costs: 1.15, rate: model.discountRate + 0.03 },
     { name: "基准" as const, revenue: 1, costs: 1, rate: model.discountRate },
@@ -185,13 +204,19 @@ export function evaluateProject(model: ProjectModel): EvaluationResult {
         downsideNpv,
         upsideNpv,
         impact: Math.abs(upsideNpv - downsideNpv),
-        switchingValue: item.variable === "收入" ? `基准收入的 ${(revenueSwitch * 100).toFixed(1)}%` : "见情景结果",
+        switchingValue:
+          item.variable === "收入"
+            ? revenueSwitch === null
+              ? "收入达到基准的 200% 仍无法转正，方案需重构"
+              : `基准收入的 ${(revenueSwitch * 100).toFixed(1)}%`
+            : "见情景结果",
       };
     })
     .sort((a, b) => b.impact - a.impact);
   const missingCosts = model.hiddenCosts.filter((item) => !item.included);
   const unknowns = model.assumptions.filter((item) => item.status === "unknown" || item.confidence === "low");
   const warnings = [
+    ...(usesManualCashFlows ? ["正在使用手工现金流，经营驱动参数不参与本次计算"] : []),
     ...(missingCosts.length ? [`有 ${missingCosts.length} 项隐藏成本尚未计入`] : []),
     ...(unknowns.length ? [`有 ${unknowns.length} 项关键假设仍待验证`] : []),
     ...(signChanges(cashFlows) > 1 ? ["现金流多次改变正负号，IRR 可能存在多解；请以 NPV/MIRR 为主"] : []),
@@ -202,11 +227,25 @@ export function evaluateProject(model: ProjectModel): EvaluationResult {
   else if (unknowns.length > 0) recommendation = "继续验证";
   else if (warnings.length > 0 || scenarios[0].npv < 0) recommendation = "满足条件后推进";
   else recommendation = "建议推进";
-  const revenueByPeriod = cashFlows.slice(1).map((_, index) =>
-    model.revenue.prospects * model.revenue.conversionRate * model.revenue.averageTicket * model.revenue.frequency *
-    (1 + model.revenue.annualGrowth) ** index,
-  );
-  return { cashFlows, revenueByPeriod, metrics, scenarios, sensitivity, recommendation, warnings };
+  const revenueByPeriod = usesManualCashFlows
+    ? []
+    : cashFlows.slice(1).map((_, index) =>
+        model.revenue.prospects * model.revenue.conversionRate * model.revenue.averageTicket * model.revenue.frequency *
+        (1 + model.revenue.annualGrowth) ** index,
+      );
+  let breakEvenPoint: EvaluationResult["breakEven"] = null;
+  if (!usesManualCashFlows) {
+    try {
+      breakEvenPoint = breakEven(
+        model.annualFixedOperatingCost,
+        model.revenue.averageTicket * model.variableCostRate,
+        model.revenue.averageTicket,
+      );
+    } catch {
+      breakEvenPoint = null;
+    }
+  }
+  return { cashFlows, revenueByPeriod, usesManualCashFlows, breakEven: breakEvenPoint, metrics, scenarios, sensitivity, recommendation, warnings };
 }
 
 export interface ReverseValuationInput {

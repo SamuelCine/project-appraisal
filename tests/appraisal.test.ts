@@ -98,4 +98,44 @@ describe("project appraisal", () => {
     expect(record.failureConditions.length).toBeGreaterThan(0);
     expect(record.nextActions).toContain("验证并决定是否计入：创始人时间");
   });
+
+  it("provides break-even from operating drivers", () => {
+    const result = evaluateProject(project);
+    expect(result.breakEven).not.toBeNull();
+    // 固定成本 80000 / (客单价 100 − 单位变动成本 35) ≈ 1230.77 单
+    expect(result.breakEven?.units).toBeCloseTo(80000 / 65, 4);
+  });
+
+  it("uses manual cash flows and suppresses driver-based revenue", () => {
+    const result = evaluateProject({ ...project, manualCashFlows: [-100000, 60000, 60000] });
+    expect(result.cashFlows).toEqual([-100000, 60000, 60000]);
+    expect(result.revenueByPeriod).toEqual([]);
+    expect(result.usesManualCashFlows).toBe(true);
+    expect(result.breakEven).toBeNull();
+    expect(result.warnings).toContain("正在使用手工现金流，经营驱动参数不参与本次计算");
+  });
+
+  it("computes XNPV and XIRR for dated cash flows", () => {
+    const result = evaluateProject({
+      ...project,
+      datedCashFlows: [
+        { date: "2027-01-01", amount: 1100 },
+        { date: "2026-01-01", amount: -1000 },
+      ],
+    });
+    expect(result.metrics.xnpv).toBeCloseTo(0, 6);
+    expect(result.metrics.xirr).toBeCloseTo(0.1, 5);
+    // 无日期现金流时 XNPV/XIRR 应为空
+    expect(evaluateProject(project).metrics.xnpv).toBeNull();
+  });
+
+  it("reports when no revenue level within 200% can break even", () => {
+    const result = evaluateProject({
+      ...project,
+      revenue: { prospects: 10, conversionRate: 0.01, averageTicket: 10, frequency: 1, annualGrowth: 0 },
+      annualFixedOperatingCost: 500000,
+    });
+    const revenue = result.sensitivity.find((item) => item.variable === "收入");
+    expect(revenue?.switchingValue).toBe("收入达到基准的 200% 仍无法转正，方案需重构");
+  });
 });

@@ -45,4 +45,14 @@ describe("project repository", () => {
     expect(repository.list()).toHaveLength(1);
     expect(repository.get(first.id)?.model.name).toBe("更新后的项目");
   });
+
+  it("removes a saved project and reports missing ids", () => {
+    const repository = createProjectRepository(":memory:");
+    repositories.push(repository);
+    const saved = repository.save(model);
+    expect(repository.remove(saved.id)).toBe(true);
+    expect(repository.get(saved.id)).toBeNull();
+    expect(repository.list()).toHaveLength(0);
+    expect(repository.remove(saved.id)).toBe(false);
+  });
 });
