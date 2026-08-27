@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { gsap } from "gsap";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Dices, Download, FileCheck2, FolderOpen,
-  Gauge, Landmark, Plus, Printer, RefreshCw, Save, ShieldCheck, Trash2, Upload, X,
+  Gauge, Landmark, Newspaper, Plus, Printer, RefreshCw, Save, ShieldCheck, Trash2, Upload, X,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -15,6 +15,8 @@ import {
 } from "@/lib/finance/appraisal";
 import { defaultProject } from "@/lib/finance/default-project";
 import type { SimulationResult } from "@/lib/finance/simulate";
+import type { StoredNewsItem } from "@/lib/db/repository";
+import type { NewsKeyword } from "@/lib/news/keywords";
 import { normalizeProjectModel } from "@/lib/finance/validate";
 import type { DatedCashFlow } from "@/lib/finance/math";
 import { cashFlowsToCsv, decisionRecordToMarkdown, parseCashFlowCsv, projectFromJson, projectToJson } from "@/lib/report/export";
@@ -147,6 +149,15 @@ export function ProjectApp() {
   const [datedCsv, setDatedCsv] = useState("");
   const [csvError, setCsvError] = useState("");
   const [simState, setSimState] = useState<SimulationState>({ loading: false, result: null, interpretation: null, error: "" });
+  const [newsOpen, setNewsOpen] = useState(false);
+  const [newsState, setNewsState] = useState<{
+    loading: boolean;
+    collecting: boolean;
+    items: StoredNewsItem[];
+    keywords: NewsKeyword[];
+    message: string;
+    error: string;
+  }>({ loading: false, collecting: false, items: [], keywords: [], message: "", error: "" });
   const rootRef = useRef<HTMLDivElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -344,6 +355,45 @@ export function ProjectApp() {
     }
   }
 
+  // 新闻情报：读取当前项目的情报池与生长出的关键词；采集按钮触发 GDELT 抓取。
+  async function openNews() {
+    setNewsOpen(true);
+    if (!projectId) return;
+    setNewsState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const response = await fetch(`/api/projects/${projectId}/news`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "读取失败");
+      setNewsState((current) => ({ ...current, loading: false, items: body.items ?? [], keywords: body.keywords ?? [] }));
+    } catch (error) {
+      setNewsState((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "读取新闻失败" }));
+    }
+  }
+
+  async function refreshNews() {
+    if (!projectId) return;
+    setNewsState((current) => ({ ...current, collecting: true, message: "", error: "" }));
+    try {
+      const response = await fetch(`/api/projects/${projectId}/news/refresh`, { method: "POST" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "采集失败");
+      const failed = (body.errors ?? []).length;
+      setNewsState((current) => ({
+        ...current,
+        message: `本次新增 ${body.newItems} 条，情报池共 ${body.totalItems} 条${failed ? `；${failed} 个关键词采集失败` : ""}`,
+      }));
+      const listResponse = await fetch(`/api/projects/${projectId}/news`);
+      const listBody = await listResponse.json();
+      if (listResponse.ok) {
+        setNewsState((current) => ({ ...current, items: listBody.items ?? [], keywords: listBody.keywords ?? [] }));
+      }
+    } catch (error) {
+      setNewsState((current) => ({ ...current, error: error instanceof Error ? error.message : "采集失败，请检查网络后重试" }));
+    } finally {
+      setNewsState((current) => ({ ...current, collecting: false }));
+    }
+  }
+
   const histogramData = (simState.result?.histogram ?? []).map((bin) => ({
     label: formatMoney((bin.from + bin.to) / 2, project.currency),
     count: bin.count,
@@ -494,6 +544,7 @@ export function ProjectApp() {
           <span className="hidden text-xs text-[var(--muted)] md:inline">{saveState}</span>
           <button className="btn-secondary" onClick={openSavedList}><FolderOpen className="mr-2 inline" size={15} />打开项目</button>
           <button className="btn-secondary" onClick={() => setMarketOpen(true)}><Gauge className="mr-2 inline" size={15} />假设依据</button>
+          <button className="btn-secondary" onClick={() => void openNews()}><Newspaper className="mr-2 inline" size={15} />新闻情报</button>
           <button className="btn-secondary" onClick={() => importRef.current?.click()}><Upload className="mr-2 inline" size={15} />导入</button>
           <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={(e) => { void importProject(e.target.files?.[0]); e.target.value = ""; }} />
           {evaluationResult && record && (
@@ -774,6 +825,63 @@ export function ProjectApp() {
               新建空白项目
             </button>
           </div>
+        </div>
+      )}
+
+      {newsOpen && (
+        <div className="fixed inset-0 z-40" onClick={() => setNewsOpen(false)}>
+          <aside className="absolute right-0 top-0 h-full w-full max-w-md overflow-y-auto border-l hairline bg-[var(--paper-strong)] p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">新闻情报</h2>
+              <button aria-label="关闭" onClick={() => setNewsOpen(false)}><X size={16} /></button>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              按项目自动生长关键词，从 GDELT（全球新闻实时索引，免费）抓取相关报道。每条新闻保留链接与来源，后续预测会把它们作为风险证据引用。
+            </p>
+            {!projectId ? (
+              <p className="mt-4 rounded-lg border border-[var(--copper-soft)] bg-[var(--copper-soft)]/40 p-3 text-sm">
+                请先<b>保存项目</b>，情报池挂在已保存项目上，不同项目各自积累自己的新闻。
+              </p>
+            ) : (
+              <>
+                <button className="btn-primary mt-4 w-full text-sm disabled:opacity-50" disabled={newsState.collecting} onClick={() => void refreshNews()}>
+                  <RefreshCw className={`mr-2 inline ${newsState.collecting ? "animate-spin" : ""}`} size={14} />
+                  {newsState.collecting ? "采集中（约十几秒）…" : "立即采集最新新闻"}
+                </button>
+                {newsState.message && <p className="mt-3 text-sm text-[var(--green)]">{newsState.message}</p>}
+                {newsState.error && <p className="mt-3 flex items-center gap-2 text-sm text-[var(--red)]"><AlertTriangle size={14} />{newsState.error}</p>}
+                {newsState.keywords.length > 0 && (
+                  <div className="mt-4">
+                    <b className="text-xs text-[var(--copper)]">当前关键词（自动生长，可审计）</b>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {newsState.keywords.map((keyword) => (
+                        <span key={keyword.term} title={keyword.origin} className="rounded-full border hairline bg-white/50 px-2 py-1 text-[11px] text-[var(--muted)]">
+                          {keyword.term}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="mt-5 space-y-2">
+                  {newsState.loading && <p className="text-sm text-[var(--muted)]">读取中…</p>}
+                  {!newsState.loading && newsState.items.length === 0 && !newsState.error && (
+                    <p className="text-sm text-[var(--muted)]">情报池还是空的，点上方按钮开始第一次采集。</p>
+                  )}
+                  {newsState.items.map((item) => (
+                    <a key={item.id} href={item.url} target="_blank" rel="noreferrer" className="block rounded-lg border hairline bg-white/50 p-3 transition hover:border-[var(--copper)]">
+                      <p className="text-sm font-medium leading-5">{item.title}</p>
+                      <p className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--muted)]">
+                        <span>{item.domain}</span>
+                        <span>·</span>
+                        <span>{new Date(item.publishedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className="rounded-full border hairline px-1.5 py-0.5">{item.keyword}</span>
+                      </p>
+                    </a>
+                  ))}
+                </div>
+              </>
+            )}
+          </aside>
         </div>
       )}
 

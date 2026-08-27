@@ -13,6 +13,8 @@ const { POST: evaluateProject } = await import("@/app/api/projects/[id]/evaluate
 const { POST: reverseProject } = await import("@/app/api/projects/[id]/reverse/route");
 const { POST: simulateProjectRoute } = await import("@/app/api/projects/[id]/simulate/route");
 const { GET: aiStatus } = await import("@/app/api/ai/status/route");
+const { GET: listNews } = await import("@/app/api/projects/[id]/news/route");
+const { POST: refreshNews } = await import("@/app/api/projects/[id]/news/refresh/route");
 const { getProjectRepository } = await import("@/lib/db/repository");
 
 afterAll(() => {
@@ -141,5 +143,31 @@ describe("projects API", () => {
   it("returns 404 when simulating a missing project with no body", async () => {
     const response = await simulateProjectRoute(emptyPost(), params("does-not-exist"));
     expect(response.status).toBe(404);
+  });
+
+  it("news: dry-run previews keywords without any network call", async () => {
+    const created = await createProject(jsonRequest({ name: "咖啡情报项目" }));
+    const id = (await created.json()).id;
+    const dry = await refreshNews(new Request("http://localhost/api?dry=1", { method: "POST" }), params(id));
+    expect(dry.status).toBe(200);
+    const dryBody = await dry.json();
+    expect(dryBody.dryRun).toBe(true);
+    expect(dryBody.keywords.length).toBeGreaterThan(0);
+    expect(dryBody.keywords[0].origin).toContain("项目名");
+  });
+
+  it("news: lists an empty pool for a fresh project and 404s for missing ones", async () => {
+    const created = await createProject(jsonRequest({ name: "空情报池项目" }));
+    const id = (await created.json()).id;
+    const list = await listNews(new Request("http://localhost/api"), params(id));
+    expect(list.status).toBe(200);
+    const body = await list.json();
+    expect(body.items).toEqual([]);
+    expect(body.keywords.length).toBeGreaterThan(0);
+
+    const missing = await listNews(new Request("http://localhost/api"), params("does-not-exist"));
+    expect(missing.status).toBe(404);
+    const missingRefresh = await refreshNews(emptyPost(), params("does-not-exist"));
+    expect(missingRefresh.status).toBe(404);
   });
 });
