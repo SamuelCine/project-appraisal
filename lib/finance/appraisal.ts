@@ -123,7 +123,11 @@ function currency(amount: number, code: string) {
   }).format(amount);
 }
 
-function buildCashFlows(model: ProjectModel, revenueScale = 1, costScale = 1, delay = 0) {
+/**
+ * 构造逐期现金流。收入/成本缩放与投产延迟是蒙特卡洛模拟与情景分析的公共入口，
+ * 因此导出给 simulate.ts 使用；工作台与 API 仍应通过 evaluateProject 获取完整评估。
+ */
+export function buildCashFlows(model: ProjectModel, revenueScale = 1, costScale = 1, delay = 0) {
   if (model.manualCashFlows?.length) return [...model.manualCashFlows];
   if (model.datedCashFlows?.length) {
     return [...model.datedCashFlows]

@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { gsap } from "gsap";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Download, FileCheck2, FolderOpen,
+  AlertTriangle, ArrowLeft, ArrowRight, BookOpenCheck, Dices, Download, FileCheck2, FolderOpen,
   Gauge, Landmark, Plus, Printer, RefreshCw, Save, ShieldCheck, Trash2, Upload, X,
 } from "lucide-react";
 import {
@@ -14,6 +14,7 @@ import {
   type Assumption, type DecisionRecord, type EvaluationResult, type HiddenCost, type ProjectModel,
 } from "@/lib/finance/appraisal";
 import { defaultProject } from "@/lib/finance/default-project";
+import type { SimulationResult } from "@/lib/finance/simulate";
 import { normalizeProjectModel } from "@/lib/finance/validate";
 import type { DatedCashFlow } from "@/lib/finance/math";
 import { cashFlowsToCsv, decisionRecordToMarkdown, parseCashFlowCsv, projectFromJson, projectToJson } from "@/lib/report/export";
@@ -22,6 +23,12 @@ const stages = ["定义决策", "商业验证", "隐藏成本", "收益驱动", 
 
 type SavedProjectRow = { id: string; name: string; currency: string; updatedAt: string };
 type MarketState = { value?: number; observedAt?: string; source?: string; isStale?: boolean; error?: string };
+type SimulationState = {
+  loading: boolean;
+  result: SimulationResult | null;
+  interpretation: { text: string; source: string } | null;
+  error: string;
+};
 
 function formatMoney(value: number, currency = "CNY") {
   return new Intl.NumberFormat("zh-CN", {
@@ -139,6 +146,7 @@ export function ProjectApp() {
   const [manualCsv, setManualCsv] = useState("");
   const [datedCsv, setDatedCsv] = useState("");
   const [csvError, setCsvError] = useState("");
+  const [simState, setSimState] = useState<SimulationState>({ loading: false, result: null, interpretation: null, error: "" });
   const rootRef = useRef<HTMLDivElement>(null);
   const resultRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
@@ -318,6 +326,29 @@ export function ProjectApp() {
       setMarket(body);
     } catch (error) { setMarket({ error: error instanceof Error ? error.message : "数据服务不可用" }); }
   }
+
+  // 蒙特卡洛风险模拟：服务端跑 1000 次扰动抽样，附 AI/规则解读。种子固定 42，结果可复现。
+  async function runSimulation() {
+    setSimState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const response = await fetch("/api/projects/preview/simulate?iterations=1000&explain=1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(project),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "模拟失败");
+      setSimState({ loading: false, result: body.simulation as SimulationResult, interpretation: body.interpretation ?? null, error: "" });
+    } catch (error) {
+      setSimState({ loading: false, result: null, interpretation: null, error: error instanceof Error ? error.message : "模拟失败，请确认本地服务正在运行" });
+    }
+  }
+
+  const histogramData = (simState.result?.histogram ?? []).map((bin) => ({
+    label: formatMoney((bin.from + bin.to) / 2, project.currency),
+    count: bin.count,
+    negative: (bin.from + bin.to) / 2 < 0,
+  }));
 
   const evaluationResult = evaluation.result;
 
@@ -633,7 +664,60 @@ export function ProjectApp() {
             ))}
           </div>
 
-          <SectionTitle index="09" title="敏感性与临界值" icon={<Gauge size={16} />} className="mt-8" />
+          <SectionTitle index="09" title="风险分布模拟" icon={<Dices size={16} />} className="mt-8" />
+          <div className="mt-4 rounded-xl border hairline bg-white/40 p-4">
+            <p className="text-xs leading-5 text-[var(--muted)]">
+              对收入、成本与投产延迟做 1000 次扰动抽样，给出 NPV 分布、按期回收概率与破产线。种子固定（42），同一项目结果可复现；数字由确定性引擎产生，AI 只负责解读。
+            </p>
+            <button className="btn-primary mt-3 w-full text-sm disabled:opacity-50" disabled={simState.loading || !evaluationResult} onClick={() => void runSimulation()}>
+              <Dices className="mr-2 inline" size={15} />{simState.loading ? "模拟中…" : simState.result ? "重新运行 1000 次模拟" : "运行 1000 次模拟"}
+            </button>
+            {simState.error && <p className="mt-3 flex items-center gap-2 text-sm text-[var(--red)]"><AlertTriangle size={14} />{simState.error}</p>}
+            {simState.result && (
+              <div className="mt-4 space-y-4">
+                <div className="grid grid-cols-3 gap-2 text-sm">
+                  <Metric label="NPV P10（悲观）" value={formatMoney(simState.result.npv.p10, project.currency)} tone={simState.result.npv.p10 >= 0 ? "good" : "bad"} />
+                  <Metric label="NPV P50（中位）" value={formatMoney(simState.result.npv.p50, project.currency)} tone={simState.result.npv.p50 >= 0 ? "good" : "bad"} />
+                  <Metric label="NPV P90（乐观）" value={formatMoney(simState.result.npv.p90, project.currency)} tone={simState.result.npv.p90 >= 0 ? "good" : "bad"} />
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-sm">
+                  <Metric label="亏损概率" value={formatPercent(simState.result.probNpvNegative)} tone={simState.result.probNpvNegative > 0.4 ? "bad" : undefined} />
+                  <Metric label="按期回收概率" value={formatPercent(simState.result.probPaybackWithinPeriods)} />
+                  <Metric
+                    label="资金耗尽概率"
+                    value={formatPercent(simState.result.insolvency.probability)}
+                    tone={simState.result.insolvency.probability > 0.1 ? "bad" : undefined}
+                  />
+                </div>
+                <div className="h-40">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={histogramData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--line)" />
+                      <XAxis dataKey="label" fontSize={10} interval={4} angle={-20} textAnchor="end" height={44} />
+                      <YAxis fontSize={11} width={36} />
+                      <Tooltip formatter={(v) => [`${v} 次`, "出现次数"]} />
+                      <Bar dataKey="count" name="出现次数" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                        {histogramData.map((row) => <Cell key={row.label} fill={row.negative ? "var(--red)" : "var(--green)"} />)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                {simState.interpretation && (
+                  <div className="rounded-lg border-l-2 border-[var(--copper)] bg-white/50 p-3">
+                    <div className="flex items-center justify-between">
+                      <b className="text-xs text-[var(--copper)]">分布解读</b>
+                      <span className="rounded-full border hairline px-2 py-0.5 text-[10px] text-[var(--muted)]">
+                        {simState.interpretation.source === "rules" ? "规则模式" : `AI · ${simState.interpretation.source}`}
+                      </span>
+                    </div>
+                    <p className="mt-2 whitespace-pre-line text-xs leading-5 text-[var(--muted)]">{simState.interpretation.text}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <SectionTitle index="10" title="敏感性与临界值" icon={<Gauge size={16} />} className="mt-8" />
           <div className="mt-4 space-y-3">
             {evaluationResult?.sensitivity.map((item) => (
               <div key={item.variable} className="border-b hairline pb-3 text-sm">
@@ -643,7 +727,7 @@ export function ProjectApp() {
             ))}
           </div>
 
-          <SectionTitle index="10" title="决策建议" icon={<Gauge size={16} />} className="mt-8" />
+          <SectionTitle index="11" title="决策建议" icon={<Gauge size={16} />} className="mt-8" />
           {evaluationResult && (
             <p className="mt-3 rounded-lg border-l-2 border-[var(--copper)] bg-white/40 p-3 text-sm font-medium">{evaluationResult.recommendation}</p>
           )}

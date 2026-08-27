@@ -11,6 +11,8 @@ const { GET: listProjects, POST: createProject } = await import("@/app/api/proje
 const { GET: getProject, PUT: updateProject, DELETE: deleteProject } = await import("@/app/api/projects/[id]/route");
 const { POST: evaluateProject } = await import("@/app/api/projects/[id]/evaluate/route");
 const { POST: reverseProject } = await import("@/app/api/projects/[id]/reverse/route");
+const { POST: simulateProjectRoute } = await import("@/app/api/projects/[id]/simulate/route");
+const { GET: aiStatus } = await import("@/app/api/ai/status/route");
 const { getProjectRepository } = await import("@/lib/db/repository");
 
 afterAll(() => {
@@ -92,5 +94,52 @@ describe("projects API", () => {
     );
     expect(ok.status).toBe(200);
     expect((await ok.json()).valueCeiling).toBeCloseTo(751314.8, 1);
+  });
+
+  it("simulates a stored project and stays reproducible for the same seed", async () => {
+    const created = await createProject(jsonRequest({ name: "模拟项目" }));
+    const id = (await created.json()).id;
+    const url = "http://localhost/api?iterations=100&seed=9";
+    const first = await simulateProjectRoute(new Request(url, { method: "POST" }), params(id));
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody.simulation.iterations).toBe(100);
+    expect(firstBody.simulation.options.seed).toBe(9);
+    expect(firstBody.simulation.npv.p10).toBeLessThanOrEqual(firstBody.simulation.npv.p90);
+    expect(firstBody.interpretation).toBeNull();
+    const second = await simulateProjectRoute(new Request(url, { method: "POST" }), params(id));
+    expect((await second.json()).simulation).toEqual(firstBody.simulation);
+  });
+
+  it("returns rule-mode interpretation with explain=1 when no AI model is available", async () => {
+    process.env.AI_PROVIDER = "auto";
+    process.env.OLLAMA_BASE_URL = "http://127.0.0.1:9";
+    delete process.env.OPENAI_API_KEY;
+    const response = await simulateProjectRoute(
+      new Request("http://localhost/api?iterations=50&explain=1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "解释项目" }),
+      }),
+      params("preview"),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.interpretation.source).toBe("rules");
+    expect(body.interpretation.text).toContain("时间线与回报分布");
+  });
+
+  it("reports AI status without crashing when nothing is installed", async () => {
+    process.env.AI_PROVIDER = "auto";
+    delete process.env.OPENAI_API_KEY;
+    const response = await aiStatus(new Request("http://localhost/api?refresh=1"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(["ai", "rules"]).toContain(body.mode);
+  });
+
+  it("returns 404 when simulating a missing project with no body", async () => {
+    const response = await simulateProjectRoute(emptyPost(), params("does-not-exist"));
+    expect(response.status).toBe(404);
   });
 });
